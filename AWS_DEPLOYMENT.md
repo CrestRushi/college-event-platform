@@ -76,7 +76,7 @@ The application uses AWS SDK’s standard credential chain. On EC2, do **not** c
      "Version": "2012-10-17",
      "Statement": [{
        "Effect": "Allow",
-       "Action": "s3:PutObject",
+       "Action": ["s3:PutObject", "s3:GetObject"],
        "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/registrations/*"
      }]
    }
@@ -84,7 +84,7 @@ The application uses AWS SDK’s standard credential chain. On EC2, do **not** c
 
 5. Create the role.
 
-`s3:PutObject` applies to an object ARN, including the bucket prefix; AWS documents the object ARN form in its [S3 IAM guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/security_iam_service-with-iam.html). The same IAM role can be attached to both servers; AWS describes how to [attach an IAM role to EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/attach-iam-role.html).
+`s3:PutObject` stores uploaded documents and `s3:GetObject` lets the API display them from the private bucket when a user selects **View uploaded document**. Both actions apply to an object ARN, including the bucket prefix; AWS documents the object ARN form in its [S3 IAM guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/security_iam_service-with-iam.html). The same IAM role can be attached to both servers; AWS describes how to [attach an IAM role to EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/attach-iam-role.html).
 
 ## 5. Create PostgreSQL on Amazon RDS
 
@@ -238,15 +238,16 @@ An ALB uses HTTP GET health checks against the configured path and port; review 
 2. Check the header: **Running on: Server 1** or **Server 2**.
 3. Refresh several times. With ALB stickiness disabled, requests can show either server.
 4. Submit a registration without a file. Confirm a success ID appears.
-5. Upload a small document. Confirm `registrations/REG-.../` appears in S3.
-6. On Server 1, verify RDS data:
+5. Upload a permitted document (PDF, DOC, DOCX, JPG, or PNG; 10 MB or smaller). Confirm a key such as `registrations/REG-.../` appears in S3.
+6. Find that registration by ID or email and select **View uploaded document**. It should open through the application while the S3 bucket remains private.
+7. On Server 1, verify RDS data:
 
    ```bash
    PGPASSWORD='YOUR_RDS_PASSWORD' psql -h YOUR_RDS_ENDPOINT -U YOUR_RDS_USERNAME -d college_events \
      -c 'SELECT registration_id, full_name, created_at FROM registrations ORDER BY created_at DESC;'
    ```
 
-7. On the target group, stop one API process to demonstrate failure:
+8. On the target group, stop one API process to demonstrate failure:
 
    ```bash
    pm2 stop college-event-api
@@ -281,9 +282,10 @@ Wait for the instance to return **Healthy** in the target group before updating 
 | ALB target unhealthy | Run `curl http://localhost/api/health`; check `pm2 logs`, `sudo nginx -t`, Nginx status, port-80 EC2 security group, and target port 80. |
 | Page loads but API fails | Ensure `NEXT_PUBLIC_API_URL=` was blank **before** `npm run build`; rerun build and restart the frontend. |
 | `database: unavailable` | Check RDS availability/endpoint/credentials, `DATABASE_SSL=true`, and port 5432 from `college-ec2-sg` to `college-rds-sg`. |
-| S3 upload fails | Verify EC2 has the IAM role, bucket/region are correct, and the role policy’s bucket ARN includes `/registrations/*`. |
+| S3 upload fails | Verify EC2 has the IAM role, the bucket and `AWS_REGION` match, and the role policy grants `s3:PutObject` to `/registrations/*`. |
+| **View uploaded document** fails | Verify the EC2 role also grants `s3:GetObject` to `/registrations/*`, then inspect `pm2 logs college-event-api --lines 100`. |
 | Server badge always shows one server | Verify both targets are healthy; disable target-group stickiness for the clearest workshop demonstration. |
 
 ## Security and workshop scope
 
-This is an instructional deployment. Keep RDS private, retain S3 public-access blocking, use an EC2 IAM role instead of static AWS keys, restrict SSH to your IP, and do not commit `.env` files. Before production use, add HTTPS with ACM, authentication, authorization, presigned/private S3 object access, backups, monitoring, rate limiting, and stronger validation.
+This is an instructional deployment. Keep RDS and S3 documents private, retain S3 public-access blocking, use an EC2 IAM role instead of static AWS keys, restrict SSH to your IP, and do not commit `.env` files. The application currently retrieves private documents through its API; before production use, add HTTPS with ACM, authentication and authorization around registration/document access, backups, monitoring, rate limiting, and stronger validation.

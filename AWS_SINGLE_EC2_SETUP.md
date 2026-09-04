@@ -1,12 +1,12 @@
 # Single EC2 Deployment Guide — First AWS Test
 
-Use this guide to validate the College Event Registration Platform on **one EC2 instance** before adding RDS, S3, a second server, and an Application Load Balancer.
+Use this guide to deploy the College Event Registration Platform on **one EC2 instance** with a local PostgreSQL database and Amazon S3 document storage. This is a learning/demo setup, not a highly available production configuration.
 
 ```text
 Browser → EC2 public IP / Elastic IP → Nginx → Next.js + Express → PostgreSQL
 ```
 
-For this first test, the simplest database is PostgreSQL installed on the same EC2 instance. S3 document uploads are optional and can be added later. This is a learning/demo setup, not a highly available production configuration.
+For this first test, PostgreSQL runs on the same EC2 instance and uploaded registration documents are stored in Amazon S3. This is a learning/demo setup, not a highly available production configuration.
 
 ## What you need
 
@@ -101,7 +101,7 @@ SERVER_NAME=Single EC2 Server
 DATABASE_URL=postgresql://college_app:CHANGE_THIS_PASSWORD@localhost:5432/college_events
 DATABASE_SSL=false
 AWS_REGION=ap-south-1
-AWS_S3_BUCKET_NAME=
+AWS_S3_BUCKET_NAME=YOUR_BUCKET_NAME
 CORS_ORIGIN=http://localhost:3000
 ```
 
@@ -177,8 +177,9 @@ Verify the following:
 1. The College Tech Fest page loads.
 2. The header shows **Running on: Single EC2 Server**.
 3. The AWS status panel shows the database as **connected**.
-4. You can submit a registration without attaching a document.
+4. You can submit a registration with or without a document.
 5. The **Find your registration** section finds that registration by ID or email.
+6. For a registration with an uploaded document, select **View uploaded document** to open it in a new tab.
 
 Confirm the data directly on EC2:
 
@@ -186,12 +187,23 @@ Confirm the data directly on EC2:
 sudo -u postgres psql -d college_events -c 'SELECT registration_id, full_name, email, created_at FROM registrations ORDER BY created_at DESC;'
 ```
 
-## Optional: Add S3 file uploads to the single server
+## 9. Configure S3 document uploads
 
-Complete this only after normal registration works.
+Complete this before testing the document-upload field. Registrants may upload PDF, DOC, DOCX, JPG, or PNG files up to 10 MB. Files are stored in S3 and shown through the API when a registration is found.
 
-1. Create an S3 bucket in the same AWS Region.
-2. Create an EC2 IAM role that permits `s3:PutObject` on `arn:aws:s3:::YOUR_BUCKET_NAME/registrations/*`.
+1. Create an S3 bucket in the same AWS Region as the `AWS_REGION` value below. Keep **Block all public access** enabled: documents are returned through the API and do not need public S3 access.
+2. Create an EC2 IAM role with this least-privilege inline policy (replace `YOUR_BUCKET_NAME`):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["s3:PutObject", "s3:GetObject"],
+       "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/registrations/*"
+     }]
+   }
+   ```
 3. Attach that role to the EC2 instance: **EC2** → **Instances** → select your instance → **Actions** → **Security** → **Modify IAM role**.
 4. Edit `backend/.env`:
 
@@ -206,9 +218,10 @@ Complete this only after normal registration works.
    pm2 restart college-event-api
    ```
 
-6. Submit a registration with a small document and verify it appears in the S3 bucket under `registrations/`.
+6. Submit a registration with a permitted document smaller than 10 MB. Verify it appears in the S3 bucket under a path such as `registrations/REG-12345678/...`.
+7. Use **Find your registration** on the website and select **View uploaded document**. This reads the private object through the API, so `s3:GetObject` is required in addition to `s3:PutObject`.
 
-Do not add static AWS access keys to the environment file. IAM roles are the intended EC2 credential method.
+Do not add static AWS access keys to the environment file. IAM roles are the intended EC2 credential method. If S3 reports `PermanentRedirect`, `AWS_REGION` does not match the bucket's Region; copy the exact Region from the bucket's **Properties** page and restart the API.
 
 ## Updating code on the single EC2 instance
 
@@ -234,7 +247,9 @@ If you changed `frontend/.env.local`, rebuild the frontend. If you changed `back
 | Nginx returns 502 | Run `pm2 status` and `pm2 logs`; the frontend or API process is likely stopped. |
 | API says `database: unavailable` | Verify PostgreSQL: `sudo systemctl status postgresql`; validate credentials and database name in `backend/.env`. |
 | API says password must be a string | `DATABASE_URL` has an empty/malformed password. Use `postgresql://USER:PASSWORD@localhost:5432/college_events`. |
-| S3 upload fails | Verify the bucket name/region and that the EC2 instance IAM role allows `s3:PutObject` to the `registrations/*` prefix. |
+| S3 upload fails with `PermanentRedirect` | `AWS_REGION` does not match the bucket's Region. Copy the exact Region from S3 bucket **Properties**, save `backend/.env`, then run `pm2 restart college-event-api`. |
+| S3 upload fails with `AccessDenied` | Confirm the EC2 IAM role allows `s3:PutObject` on `arn:aws:s3:::YOUR_BUCKET/registrations/*`. |
+| **View uploaded document** fails | Confirm the EC2 IAM role also allows `s3:GetObject` on `arn:aws:s3:::YOUR_BUCKET/registrations/*`; inspect `pm2 logs college-event-api --lines 100`. |
 
 ## Next step: move to the full architecture
 

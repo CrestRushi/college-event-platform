@@ -4,10 +4,24 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { getPool, databaseStatus } from './db.js';
-import { uploadDocument } from './storage.js';
+import { getDocument, uploadDocument } from './storage.js';
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const allowedDocumentTypes = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'image/jpeg',
+  'image/png'
+]);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => {
+    if (allowedDocumentTypes.has(file.mimetype)) return callback(null, true);
+    callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', file.fieldname));
+  }
+});
 const port = Number(process.env.PORT || 5000);
 const serverName = process.env.SERVER_NAME || 'Local Server';
 
@@ -41,12 +55,28 @@ app.get('/api/registrations/search', async (req, res, next) => {
   }
   try {
     const { rows } = await getPool().query(`SELECT r.registration_id, r.full_name, r.email, r.phone,
-      r.college_name, r.document_s3_key, r.created_at, e.name AS event_name
+      r.college_name, r.document_s3_key, r.document_url, r.created_at, e.name AS event_name
       FROM registrations r JOIN events e ON e.id = r.event_id
       WHERE ($1 = '' OR UPPER(r.registration_id) = UPPER($1))
         AND ($2 = '' OR LOWER(r.email) = $2)
       ORDER BY r.created_at DESC`, [registrationId, email]);
     res.json({ success: true, registrations: rows });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/registrations/:registrationId/document', async (req, res, next) => {
+  try {
+    const { rows } = await getPool().query(
+      'SELECT document_s3_key FROM registrations WHERE registration_id = $1',
+      [String(req.params.registrationId).trim()]
+    );
+    if (!rows[0]?.document_s3_key) {
+      return res.status(404).json({ success: false, message: 'No document was uploaded for this registration.' });
+    }
+    const document = await getDocument(rows[0].document_s3_key);
+    res.setHeader('Content-Type', document.contentType);
+    res.setHeader('Content-Disposition', 'inline');
+    document.body.pipe(res);
   } catch (error) { next(error); }
 });
 
@@ -84,7 +114,13 @@ app.get('/api/server-info', async (_req, res) => res.json({
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  const status = error.code === 'LIMIT_FILE_SIZE' ? 400 : error.statusCode || 500;
-  res.status(status).json({ success: false, message: error.code === 'LIMIT_FILE_SIZE' ? 'File must be 10 MB or smaller.' : error.statusCode ? error.message : 'Unable to complete the request.' });
+  const uploadError = error instanceof multer.MulterError;
+  const status = uploadError ? 400 : error.statusCode || 500;
+  const message = error.code === 'LIMIT_FILE_SIZE'
+    ? 'File must be 10 MB or smaller.'
+    : error.code === 'LIMIT_UNEXPECTED_FILE'
+      ? 'Upload a PDF, Word document, JPG, or PNG file.'
+      : error.statusCode ? error.message : 'Unable to complete the request.';
+  res.status(status).json({ success: false, message });
 });
 app.listen(port, () => console.log(`College Event API running on port ${port} (${serverName})`));

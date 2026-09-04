@@ -1,91 +1,159 @@
-# Single EC2 + Amazon RDS Deployment Guide
+# First AWS Deployment: One EC2 Server + Private RDS PostgreSQL
 
-Use this guide to validate the application with its AWS database architecture before adding a second EC2 instance and an Application Load Balancer.
+This beginner-friendly guide deploys this project for the first time. The website runs on one public EC2 server; its data lives in a separate, **private** Amazon RDS PostgreSQL database.
 
 ```text
-Browser → EC2 public IP / Elastic IP → Nginx → Next.js + Express → Amazon RDS PostgreSQL
-                                                              └──→ Amazon S3 (optional)
+Browser -> EC2 public IPv4 / Elastic IP -> Nginx -> Next.js + Express -> private RDS PostgreSQL
 ```
 
-This deployment has **one application server** and **one separate, private RDS PostgreSQL database**. It is a useful first AWS test, but it is not highly available until you later add a second EC2 instance and an ALB.
+This is a good learning/test setup, but not highly available: if the EC2 instance stops, the site stops. Complete this guide before moving to the two-server/ALB design.
 
-## What you need
+## Before you begin
 
-- AWS account and one AWS Region (examples use `ap-south-1`)
-- A GitHub repository containing this project, or another secure way to copy it to EC2
-- EC2 SSH key pair
-- RDS PostgreSQL master username/password
+You need an AWS account, a private GitHub repository containing this project, a computer with SSH (PowerShell works on Windows), and one AWS Region. Examples use Mumbai, `ap-south-1`; choose one Region and use it for all AWS resources.
 
-GitHub is recommended but not required. If needed, first follow the GitHub section of [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md#1-put-the-source-code-in-github). Do not commit `backend/.env`, `frontend/.env.local`, RDS passwords, or AWS keys.
+Create a billing/budget alert before starting. EC2 and RDS can create charges while running, even when idle. AWS notes that a running EC2 instance is billable. See the [EC2 launch guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-instance-wizard.html).
 
-## 1. Create security groups
+| Item | Example |
+| --- | --- |
+| EC2 security group | `college-one-ec2-sg` |
+| RDS security group | `college-one-rds-sg` |
+| EC2 instance | `college-event-server-1` |
+| RDS instance identifier | `college-event-db` |
+| Application database | `college_events` |
+| Linux login user | `ubuntu` |
 
-Create these security groups in the **same VPC**. This is essential: the EC2 security-group ID will be the RDS rule source.
+### Security rules to keep throughout
 
-| Name | Inbound rules | Purpose |
-| --- | --- | --- |
-| `college-one-ec2-sg` | SSH 22 from **your IP**; HTTP 80 from `0.0.0.0/0` | Public application server |
-| `college-one-rds-sg` | PostgreSQL 5432 from **`college-one-ec2-sg`** | Private RDS access |
+- Never commit `backend/.env`, `frontend/.env.local`, a `.pem` key, RDS password, GitHub token, or AWS access keys.
+- Keep RDS private: never make it publicly accessible or allow port 5432 from `0.0.0.0/0`.
+- Allow SSH only from **My IP**, never `0.0.0.0/0`.
+- Save the RDS password in a password manager. AWS cannot show a self-managed master password again after creation; it would need to be reset. See [RDS database creation](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateDBInstance.html).
 
-Do not open RDS port 5432 to your public IP or `0.0.0.0/0`. The database should accept traffic only from the EC2 application security group. AWS documents this security-group pattern for EC2-to-RDS connections in its [RDS guidance](https://docs.aws.amazon.com/AmazonRDS/latest/gettingstartedguide/security-groups.html).
+## 1. Create the security groups
 
-## 2. Create the RDS PostgreSQL database
+1. Sign in to AWS and select your Region in the upper-right corner.
+2. Open **EC2** -> **Security Groups** -> **Create security group**.
+3. Create `college-one-ec2-sg` in your default/project VPC with these inbound rules:
 
-1. Open **Amazon RDS** → **Create database**.
-2. Choose **Standard create** → **PostgreSQL**.
-3. Select a suitable workshop instance class.
-4. Enter a DB instance identifier, for example `college-event-db`.
-5. Set and securely record the master username and password.
-6. Under Connectivity, select the same VPC where EC2 will run.
-7. Set **Public access** to **No**.
-8. Select `college-one-rds-sg`.
-9. Create the database and wait for status **Available**.
-10. Copy the DB endpoint from RDS Connectivity & security. It resembles:
+   | Type | Port | Source | Purpose |
+   | --- | --- | --- | --- |
+   | SSH | 22 | **My IP** | Secure server administration |
+   | HTTP | 80 | `0.0.0.0/0` | Public website traffic |
 
-    ```text
-    college-event-db.abc123xyz.ap-south-1.rds.amazonaws.com
-    ```
+   Keep the default outbound rule enabled.
 
-RDS’s endpoint, port, and connection details are listed in the RDS console. The EC2 and RDS resources must be in the same VPC to use the security-group connection in this guide. See [AWS’s EC2/RDS connectivity documentation](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/ec2-rds-connect.html).
+4. Create `college-one-rds-sg` in the **same VPC**. Add one inbound rule:
 
-## 3. Launch one EC2 application server
+   | Type | Port | Source |
+   | --- | --- | --- |
+   | PostgreSQL | 5432 | Select security group `college-one-ec2-sg` |
 
-1. Open **EC2** → **Launch instance**.
+Choose the EC2 *security group* as the source, not its public IP address. Only servers assigned that group can reach PostgreSQL.
+
+## 2. Create the EC2 application server
+
+Create EC2 first so it can be selected while configuring RDS networking.
+
+1. Open **EC2** -> **Instances** -> **Launch instances**.
 2. Name it `college-event-server-1`.
-3. Choose **Ubuntu Server 22.04 LTS** or newer.
-4. Select a workshop-suitable instance type.
-5. Select/create an SSH key pair.
-6. Select the same VPC as RDS and attach `college-one-ec2-sg`.
-7. Launch the instance and wait for it to be running.
-8. Copy its public IPv4 address, or allocate an Elastic IP for a stable test URL.
+3. Choose **Ubuntu Server 22.04 LTS** or newer Ubuntu LTS.
+4. Choose a small general-purpose instance suitable for your account and budget. Check current price/Free Tier eligibility in your Region.
+5. Under **Key pair (login)**, choose **Create new key pair**:
+   - Name: `college-event-key`
+   - Type: RSA; format: `.pem` for OpenSSH/PowerShell.
+   - Download it and save it outside this repository. AWS provides it only once.
+6. Under **Network settings**, click **Edit** and select your default/project VPC, a public subnet with public IPv4 enabled, and existing security group `college-one-ec2-sg`.
+7. Launch the instance. Wait for `Running` and `2/2 checks passed`, then copy its **Public IPv4 address**.
 
-## 4. Connect to the server and clone the project
+AWS documents the console steps in its [instance launch wizard guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-instance-wizard.html).
 
-From the folder containing your key:
+## 3. Create the private RDS PostgreSQL database
 
-```bash
-ssh -i college-key.pem ubuntu@YOUR_EC2_PUBLIC_IP
+1. Open **RDS** -> **Databases** -> **Create database**.
+2. Select **Standard create**, then **PostgreSQL**.
+3. Choose **Dev/Test** for a learning deployment. For production, use production settings and review high availability, backup, and cost choices.
+4. Under **Settings**, enter:
+   - **DB instance identifier:** `college-event-db`
+   - **Master username:** for example `appadmin`
+   - A strong password (save it securely).
+   - **Initial database name:** `college_events`, if that field is available.
+5. Select a DB instance class/storage size suitable for learning and your budget.
+6. Under **Connectivity**, choose the same VPC used by EC2. Set:
+   - **Public access:** `No`
+   - **VPC security group:** existing `college-one-rds-sg`
+   - PostgreSQL port: `5432`
+7. Create the database and wait for **Status: Available**.
+8. In **Connectivity & security**, copy the **Endpoint**. It resembles:
+
+   ```text
+   college-event-db.abc123xyz.ap-south-1.rds.amazonaws.com
+   ```
+
+Copy only the hostname—no `https://`, port, or database name. RDS requires VPC/subnet networking that covers at least two Availability Zones; the console can configure this. AWS recommends keeping the database private for EC2-to-RDS deployments. See [RDS networking guidance](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateDBInstance.html).
+
+## 4. Connect to EC2
+
+Open PowerShell in the folder containing your downloaded key, then replace the placeholder:
+
+```powershell
+ssh -i .\college-event-key.pem ubuntu@YOUR_EC2_PUBLIC_IP
 ```
 
-Clone the project:
+Type `yes` when asked to trust the host. A successful connection shows an `ubuntu@...` prompt.
+
+If it times out, confirm the instance is running, its address is current, and the SSH security-group source is your current IP. Home/office IP addresses can change.
+
+## 5. Clone your private GitHub repository securely
+
+Use a GitHub **deploy key**. It is an SSH key restricted to this server and repository. Make it read-only; the server only needs to pull code. Do not copy your personal laptop GitHub key to EC2. GitHub describes this model in [Managing deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys).
+
+Run these commands **on EC2**:
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/college-event-platform.git
-cd college-event-platform
+sudo apt-get update
+sudo apt-get install -y git
+ssh-keygen -t ed25519 -C "college-event-ec2-readonly" -f ~/.ssh/college_event_deploy_key
+cat ~/.ssh/college_event_deploy_key.pub
 ```
 
-For a private GitHub repository, configure a read-only deploy key or other approved GitHub authentication method before cloning.
+At the passphrase prompts, press Enter twice. Copy the full single public-key line beginning with `ssh-ed25519`.
 
-## 5. Configure the application
+In GitHub, open the private repository -> **Settings** -> **Deploy keys** -> **Add deploy key**. Title it `college-event-ec2`, paste the public key, leave **Allow write access** unchecked, and add it.
 
-Create the backend configuration:
+Back on EC2, configure Git to use the deploy key:
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/college_event_deploy_key
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+ssh -T git@github.com
+```
+
+GitHub should confirm authentication but say it does not provide shell access. Clone using the SSH URL from GitHub's **Code** button:
+
+```bash
+git clone git@github.com:YOUR_GITHUB_USERNAME/YOUR_REPOSITORY.git college-event-platform
+cd ~/college-event-platform
+```
+
+Do not clone with your GitHub account password; GitHub does not support password authentication for Git operations. A fine-grained personal access token is an alternative, but do not put a token in a command because shell history may expose it. A read-only deploy key is preferable here.
+
+## 6. Add the RDS application configuration
+
+From `~/college-event-platform`:
 
 ```bash
 cp backend/.env.example backend/.env
 nano backend/.env
 ```
 
-Set the following values. Replace the RDS values exactly; do not use `localhost` because PostgreSQL is on RDS, not on EC2.
+Set the file to match your database. Do not use `localhost`: PostgreSQL is on RDS.
 
 ```env
 PORT=5000
@@ -97,54 +165,52 @@ AWS_S3_BUCKET_NAME=
 CORS_ORIGIN=http://localhost:3000
 ```
 
-For example:
+For a password `Pass@123`, use `Pass%40123` in the URL:
 
 ```env
-DATABASE_URL=postgresql://postgres:Pass%40123@college-event-db.abc123xyz.ap-south-1.rds.amazonaws.com:5432/college_events
+DATABASE_URL=postgresql://appadmin:Pass%40123@college-event-db.abc123xyz.ap-south-1.rds.amazonaws.com:5432/college_events
 ```
 
-URL-encode special password characters: `@` becomes `%40`, `#` becomes `%23`, and `/` becomes `%2F`.
+URL-encode special password characters: `@` -> `%40`, `#` -> `%23`, `/` -> `%2F`, `:` -> `%3A`, `%` -> `%25`. Keep `DATABASE_SSL=true` for RDS.
 
-Create the frontend configuration. Keep the value blank so production browser requests call `/api` through Nginx on the same EC2 public hostname:
+Leave S3 blank for now; registrations work without file uploads. Create the frontend file with a blank API URL so Nginx will proxy browser requests to `/api`:
 
 ```bash
 printf 'NEXT_PUBLIC_API_URL=\n' > frontend/.env.local
 ```
 
-## 6. Install and initialize PostgreSQL on RDS
+## 7. Create the database tables
 
-Install the PostgreSQL client on EC2. This does **not** install a local database server.
+Install the PostgreSQL **client** (not a local database server):
 
 ```bash
-sudo apt-get update
 sudo apt-get install -y postgresql-client
 ```
 
-Create the application database on RDS (run once):
+If you provided `college_events` as RDS's initial database name, load the schema:
 
 ```bash
-PGPASSWORD='YOUR_RDS_PASSWORD' psql \
-  -h YOUR_RDS_ENDPOINT \
-  -U YOUR_RDS_USERNAME \
-  -d postgres \
-  -c 'CREATE DATABASE college_events;'
+psql -h YOUR_RDS_ENDPOINT -U YOUR_RDS_USERNAME -d college_events -W -f database/schema.sql
 ```
 
-Load tables and sample events:
+If you did not provide an initial database name, create it then load the schema:
 
 ```bash
-PGPASSWORD='YOUR_RDS_PASSWORD' psql \
-  -h YOUR_RDS_ENDPOINT \
-  -U YOUR_RDS_USERNAME \
-  -d college_events \
-  -f database/schema.sql
+psql -h YOUR_RDS_ENDPOINT -U YOUR_RDS_USERNAME -d postgres -W -c 'CREATE DATABASE college_events;'
+psql -h YOUR_RDS_ENDPOINT -U YOUR_RDS_USERNAME -d college_events -W -f database/schema.sql
 ```
 
-If `CREATE DATABASE` reports that `college_events` already exists, continue to the schema command. It is safe to rerun the schema script.
+`-W` prompts for the password instead of saving it in shell history. If `CREATE DATABASE` says it already exists, continue. Verify the sample data:
 
-## 7. Install Node.js, build, and start the application
+```bash
+psql -h YOUR_RDS_ENDPOINT -U YOUR_RDS_USERNAME -d college_events -W -c 'SELECT id, name FROM events;'
+```
 
-Run the included EC2 setup helper:
+A timeout usually means EC2/RDS are not in the same VPC or `college-one-rds-sg` does not allow port 5432 from `college-one-ec2-sg`.
+
+## 8. Build and start the application
+
+The repository script installs Node.js 22, PM2, dependencies, builds the frontend, and starts the API and frontend:
 
 ```bash
 chmod +x scripts/setup-ec2.sh
@@ -152,25 +218,25 @@ chmod +x scripts/setup-ec2.sh
 pm2 status
 ```
 
-It installs Node.js, PM2, dependencies, builds the frontend, and starts the Express API plus Next.js frontend.
+Both `college-event-api` and `college-event-frontend` should show `online`.
 
-Test the API from EC2:
+The script runs `pm2 startup`, which normally prints one extra `sudo ...` command. Copy and run the exact command PM2 prints, then save the process list:
+
+```bash
+pm2 save
+```
+
+Test from inside EC2:
 
 ```bash
 curl http://localhost:5000/api/health
 ```
 
-Expected output contains:
+The result should include `"status":"healthy"` and `"database":"connected"`. If the database is unavailable, check the endpoint, username, encoded password, RDS status, and security group before continuing.
 
-```json
-{"status":"healthy","server":"Server 1","database":"connected"}
-```
+## 9. Configure Nginx and test the website
 
-If it reports `database: unavailable`, stop here and check the RDS endpoint, credentials, RDS status, and the security-group rule from `college-one-ec2-sg` to `college-one-rds-sg`.
-
-## 8. Configure Nginx
-
-Nginx presents the application on port 80. It routes the frontend to port 3000 and `/api/` to port 5000.
+Nginx receives public port-80 traffic, sends pages to Next.js (port 3000), and `/api/` to Express (port 5000):
 
 ```bash
 sudo apt-get install -y nginx
@@ -183,63 +249,27 @@ sudo systemctl reload nginx
 curl http://localhost/api/health
 ```
 
-The final command should return the same healthy response through Nginx.
-
-## 9. Test in the browser
-
-Open:
+The last command should return healthy JSON. Open:
 
 ```text
 http://YOUR_EC2_PUBLIC_IP
 ```
 
-Verify:
+Verify the page loads, says **Running on: Server 1**, reports **Database: connected**, and can create/find a registration.
 
-1. The page loads and the header says **Running on: Server 1**.
-2. The AWS status panel shows **Database: connected**.
-3. You can submit a registration without a document.
-4. The success panel shows a registration ID.
-5. **Find your registration** returns it by registration ID or email.
+## Optional: stable address, S3, and updates
 
-Verify data directly in RDS from EC2:
+### Elastic IP
 
-```bash
-PGPASSWORD='YOUR_RDS_PASSWORD' psql -h YOUR_RDS_ENDPOINT -U YOUR_RDS_USERNAME -d college_events \
-  -c 'SELECT registration_id, full_name, email, created_at FROM registrations ORDER BY created_at DESC;'
-```
+An EC2 public IPv4 can change after stop/start. For a stable test URL, use **EC2** -> **Elastic IP addresses** -> **Allocate Elastic IP address**, then **Actions** -> **Associate Elastic IP address** with this instance. Use it for SSH and browser access. Release unused Elastic IPs to avoid charges.
 
-## Optional: add S3 document uploads
+### S3 document uploads
 
-After registration works, add S3:
+After registrations work, create a private S3 bucket in the same Region. Attach an EC2 IAM role allowing only `s3:PutObject` on `arn:aws:s3:::YOUR_BUCKET_NAME/registrations/*`. Set `AWS_S3_BUCKET_NAME=YOUR_BUCKET_NAME` in `backend/.env`, then run `pm2 restart college-event-api`. Use the EC2 IAM role; never store AWS access keys in `.env`.
 
-1. Create an S3 bucket in the same Region and keep public access blocked.
-2. Create an EC2 IAM role allowing `s3:PutObject` on:
+### Update deployed code
 
-   ```text
-   arn:aws:s3:::YOUR_BUCKET_NAME/registrations/*
-   ```
-
-3. Attach the role to the EC2 instance: **EC2** → **Instances** → choose instance → **Actions** → **Security** → **Modify IAM role**.
-4. Update `backend/.env`:
-
-   ```env
-   AWS_REGION=ap-south-1
-   AWS_S3_BUCKET_NAME=YOUR_BUCKET_NAME
-   ```
-
-5. Restart Express:
-
-   ```bash
-   pm2 restart college-event-api
-   ```
-
-6. Submit a registration with a document, then check S3 for `registrations/REG-.../`.
-
-Use an EC2 IAM role; never save AWS access keys in `.env`. The S3 object-permission format is described in the [AWS S3 IAM guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/security_iam_service-with-iam.html).
-
-## Updating the code
-
-After pushing changes to GitHub:
+Push changes from your computer, then on EC2 run:
 
 ```bash
 cd ~/college-event-platform
@@ -251,18 +281,20 @@ pm2 restart college-event-api
 pm2 restart college-event-frontend
 ```
 
-If you change `frontend/.env.local`, rebuild the frontend. If you change `backend/.env`, restart the API.
+Replace `main` if your branch uses another name. Environment files are not tracked by Git and remain on the server.
 
-## Troubleshooting
+## Troubleshooting and cleanup
 
-| Symptom | Check |
+| Problem | Check |
 | --- | --- |
-| `database: unavailable` | RDS is Available; endpoint/password/user are correct; `DATABASE_SSL=true`; RDS SG permits PostgreSQL 5432 from the EC2 security group. |
-| Connection timeout to RDS | EC2 and RDS must be in the same VPC (or connected networks); check both security groups and RDS public access remains disabled. |
-| ALB not relevant yet | This guide has no ALB. Test via the EC2 public/Elastic IP only. |
-| Web page but API error | Confirm `NEXT_PUBLIC_API_URL=` was blank before building; rerun `npm --prefix frontend run build` and restart `college-event-frontend`. |
-| Nginx 502 | Run `pm2 status`, `pm2 logs`, and `sudo nginx -t`. |
+| SSH timeout | Instance running, correct public/Elastic IP, port 22 source is your current IP. |
+| `Permission denied (publickey)` | Deploy key belongs to this repository; use SSH clone URL; run `ssh -T git@github.com`. |
+| RDS timeout | Same VPC, RDS Available, RDS SG source is EC2 SG, RDS public access is No. |
+| `database: unavailable` | Endpoint/user/password encoding, `DATABASE_SSL=true`, database/schema created. |
+| Page will not load | EC2 SG permits port 80; `sudo systemctl status nginx`. |
+| Nginx 502 | `pm2 status`, `pm2 logs`, and `sudo nginx -t`; both Node processes must be online. |
+| Page loads but API fails | Confirm `NEXT_PUBLIC_API_URL=` was blank before building; rebuild frontend and restart its PM2 process. |
 
-## Next step
+When testing ends, terminate EC2, delete RDS (choose whether to keep a final snapshot), release any Elastic IP, remove the deploy key from GitHub, then delete unused security groups. This prevents avoidable charges and removes access that is no longer needed.
 
-When this single-server/RDS deployment is working, proceed to [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md). That guide keeps the same RDS and S3 resources, adds Server 2, and places both servers behind an ALB for load balancing and failure recovery.
+When this single-server setup works, continue with [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md) to add a second server and an Application Load Balancer.
